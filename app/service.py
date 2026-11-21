@@ -28,6 +28,12 @@ _submit_lock = threading.Lock()
 
 IDENTITY_KEYS = ("library_name", "edition", "matrix_no", "glyph_char")
 
+# 新单存档瘦身：共需数据只存实际增减；每 SNAPSHOT_INTERVAL 张生效新单
+# 最多额外存一份完整共需清单，使按单号重取任意新单时，最多读取
+# SNAPSHOT_INTERVAL 张单的增减记录即可还原交印前后的完整共需清单。
+SNAPSHOT_INTERVAL = 32
+POOL_STORAGE_DELTA = "delta"
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -193,6 +199,51 @@ def _fingerprint(volume_id: int, chars: list[str], target: list[dict]) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+def _apply_delta(pool: dict[tuple, dict], added: list[dict], removed: list[dict]) -> None:
+    """在共需池（标识键→字模）上应用一单的实际增减。"""
+    for x in removed:
+        pool.pop(_ident_key(x), None)
+    for x in added:
+        pool[_ident_key(x)] = x
+
+
+def _hydrate_pools(conn: sqlite3.Connection, payload: dict) -> dict:
+    """还原新单交印前后的完整共需清单；旧单（整单快照）原样返回。
+
+    新单的共需数据只存实际增减：取该单之前最近一份完整共需快照，
+    顺序应用其后的增减记录。快照每 SNAPSHOT_INTERVAL 张新单存一份，
+    故最多读取 SNAPSHOT_INTERVAL 张单的增减记录。
+    """
+    if payload.pop("pool_storage", None) != POOL_STORAGE_DELTA:
+        return payload
+    seq = payload["seq"]
+    snap = conn.execute(
+        "SELECT seq, pool_json FROM pool_snapshots WHERE seq<=? ORDER BY seq DESC LIMIT 1",
+        (seq,),
+    ).fetchone()
+    if snap is None:  # 防御：首张新单必存快照，正常不会走到
+        snap_seq = 0
+        pool: dict[tuple, dict] = {}
+    else:
+        snap_seq = snap["seq"]
+        pool = {_ident_key(x): x for x in json.loads(snap["pool_json"])}
+    rows = conn.execute(
+        "SELECT added_json, removed_json FROM pool_deltas "
+        "WHERE seq>=? AND seq<? ORDER BY seq",
+        (snap_seq, seq),
+    ).fetchall()
+    for r in rows:
+        _apply_delta(pool, json.loads(r["added_json"]), json.loads(r["removed_json"]))
+    payload["pool_before"] = _sorted_idents(pool.values())
+    own = conn.execute(
+        "SELECT added_json, removed_json FROM pool_deltas WHERE seq=?", (seq,)
+    ).fetchone()
+    if own is not None:
+        _apply_delta(pool, json.loads(own["added_json"]), json.loads(own["removed_json"]))
+    payload["pool_after"] = _sorted_idents(pool.values())
+    return payload
+
+
 def _assert_pool_consistent(conn: sqlite3.Connection, stage: str) -> None:
     """校验：各册 active 并集 == 按各册用字解析出的需求并集（已交印册）。"""
     actual = {_ident_key(x) for x in _load_pool(conn)}
@@ -232,13 +283,13 @@ def _submit_tx(volume_name: str, idem_key: str | None, fail_commit: bool) -> dic
             raise DomainError(f"册“{volume_name}”不存在，请先上传用字表", 404)
         volume_id = vol["volume_id"]
 
-        # 1. 幂等键命中：原样复用
+        # 1. 幂等键命中：原样复用（不新增任何存档记录）
         if idem_key:
             old = conn.execute(
                 "SELECT payload_json FROM orders WHERE idem_key=?", (idem_key,)
             ).fetchone()
             if old is not None:
-                payload = json.loads(old["payload_json"])
+                payload = _hydrate_pools(conn, json.loads(old["payload_json"]))
                 payload["reused"] = True
                 conn.rollback()
                 return payload
@@ -284,7 +335,7 @@ def _submit_tx(volume_name: str, idem_key: str | None, fail_commit: bool) -> dic
                 (volume_id,),
             ).fetchone()
             if old is not None:
-                payload = json.loads(old["payload_json"])
+                payload = _hydrate_pools(conn, json.loads(old["payload_json"]))
                 payload["reused"] = True
                 conn.rollback()
                 return payload
@@ -314,21 +365,24 @@ def _submit_tx(volume_name: str, idem_key: str | None, fail_commit: bool) -> dic
         next_seq = row["seq"] + 1
         conn.execute("UPDATE submit_seq SET seq=?", (next_seq,))
         order_no = f"MO{datetime.now().strftime('%Y%m%d')}-{next_seq:06d}"
+        effective_at = _now_iso()
 
-        payload = {
+        # 新单存档瘦身：共需数据只存实际增减（added/removed），不再整存
+        # pool_before/pool_after 两份完整共需清单；恢复所需的增减记录与
+        # 周期性完整快照随单据在同一事务生效，交印失败时一起回滚。
+        stored_payload = {
             "order_no": order_no,
             "seq": next_seq,
             "volume": volume_name,
             "idem_key": idem_key,
             "reused": False,
             "fingerprint": fp,
-            "effective_at": _now_iso(),
-            "pool_before": pool_before,
-            "pool_after": pool_after,
+            "effective_at": effective_at,
             "added": added,
             "removed": removed,
             "volume_before": before_idents,
             "volume_after": after_idents,
+            "pool_storage": POOL_STORAGE_DELTA,
         }
         conn.execute(
             "INSERT INTO orders(order_no, seq, volume_id, volume_name, idem_key, "
@@ -340,15 +394,48 @@ def _submit_tx(volume_name: str, idem_key: str | None, fail_commit: bool) -> dic
                 volume_name,
                 idem_key,
                 fp,
-                json.dumps(payload, ensure_ascii=False),
+                json.dumps(stored_payload, ensure_ascii=False),
             ),
         )
+        conn.execute(
+            "INSERT INTO pool_deltas(seq, order_no, added_json, removed_json) "
+            "VALUES (?,?,?,?)",
+            (
+                next_seq,
+                order_no,
+                json.dumps(added, ensure_ascii=False),
+                json.dumps(removed, ensure_ascii=False),
+            ),
+        )
+        new_count = conn.execute("SELECT COUNT(*) AS c FROM pool_deltas").fetchone()["c"]
+        if (new_count - 1) % SNAPSHOT_INTERVAL == 0:
+            # 每 32 张新单额外存一份完整共需清单（本单生效前的共需并集）；
+            # 首张新单的快照即接续末张旧单生效后的共需清单。
+            conn.execute(
+                "INSERT INTO pool_snapshots(seq, pool_json) VALUES (?,?)",
+                (next_seq, json.dumps(pool_before, ensure_ascii=False)),
+            )
 
         if fail_commit:
             # 测试钩子：模拟保存失败
             raise SaveError("模拟保存失败（测试）")
         conn.commit()
-        return payload
+        # 交印响应沿用原格式（含交印前后完整共需清单）
+        return {
+            "order_no": order_no,
+            "seq": next_seq,
+            "volume": volume_name,
+            "idem_key": idem_key,
+            "reused": False,
+            "fingerprint": fp,
+            "effective_at": effective_at,
+            "pool_before": pool_before,
+            "pool_after": pool_after,
+            "added": added,
+            "removed": removed,
+            "volume_before": before_idents,
+            "volume_after": after_idents,
+        }
     except DomainError:
         conn.rollback()
         raise
@@ -370,7 +457,7 @@ def get_order(order_no: str) -> dict:
         ).fetchone()
         if row is None:
             raise DomainError(f"单号 {order_no} 不存在", 404)
-        payload = json.loads(row["payload_json"])
+        payload = _hydrate_pools(conn, json.loads(row["payload_json"]))
         payload["reused"] = False
         return payload
     finally:
@@ -447,6 +534,8 @@ def reset_all() -> None:
         conn.execute("BEGIN IMMEDIATE")
         for table in (
             "orders",
+            "pool_deltas",
+            "pool_snapshots",
             "active_matrices",
             "volume_chars",
             "volumes",

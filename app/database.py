@@ -73,6 +73,25 @@ SCHEMA = [
     CREATE UNIQUE INDEX IF NOT EXISTS idx_orders_idem
     ON orders(idem_key) WHERE idem_key IS NOT NULL
     """,
+    # 新单共需存档（瘦身）：每单只存共需池的实际增减，配合 orders 中
+    # 不再整存 pool_before/pool_after 的瘦身 payload 使用。
+    # 旧库打开时由 CREATE TABLE IF NOT EXISTS 自动补齐，旧单不受影响。
+    """
+    CREATE TABLE IF NOT EXISTS pool_deltas (
+        seq          INTEGER PRIMARY KEY,
+        order_no     TEXT NOT NULL,
+        added_json   TEXT NOT NULL,
+        removed_json TEXT NOT NULL
+    )
+    """,
+    # 周期性完整共需清单：每 32 张生效新单最多额外存一份（存该单生效前的
+    # 共需并集），按单号重取时从最近一份快照顺序应用增减即可还原。
+    """
+    CREATE TABLE IF NOT EXISTS pool_snapshots (
+        seq       INTEGER PRIMARY KEY,
+        pool_json TEXT NOT NULL
+    )
+    """,
 ]
 
 
