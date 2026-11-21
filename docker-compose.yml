@@ -1,0 +1,15 @@
+services:
+  matrix-station:
+    build: .
+    image: matrix-station:latest
+    container_name: matrix-station
+    ports:
+      - "8000:8000"
+    environment:
+      MATRIX_DB_PATH: /data/matrix.db
+    volumes:
+      - matrix-data:/data
+    restart: unless-stopped
+
+volumes:
+  matrix-data:

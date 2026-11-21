@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>古籍制版 · 字模工位管理</title>
+<style>
+  :root { --ink:#2b2620; --sub:#7a6f61; --line:#ddd6cb; --bg:#f7f4ee; --card:#fffdf8;
+          --accent:#8a5a2b; --green:#2e7d4f; --red:#b03a2e; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: "Noto Serif SC","Songti SC","SimSun",serif;
+         background:var(--bg); color:var(--ink); }
+  header { padding:22px 28px; border-bottom:2px solid var(--ink); background:var(--card); }
+  header h1 { margin:0; font-size:24px; letter-spacing:2px; }
+  header p { margin:6px 0 0; color:var(--sub); font-size:13px; }
+  main { max-width:1180px; margin:0 auto; padding:22px; display:grid;
+         grid-template-columns: 380px 1fr; gap:20px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:8px;
+          padding:18px; margin-bottom:18px; }
+  .card h2 { margin:0 0 12px; font-size:17px; border-left:4px solid var(--accent);
+             padding-left:8px; }
+  label { display:block; font-size:13px; color:var(--sub); margin:10px 0 4px; }
+  input[type=text], input[type=file] { width:100%; padding:8px; font-size:13px;
+         border:1px solid var(--line); border-radius:5px; background:#fff; }
+  button { margin-top:12px; padding:9px 18px; border:0; border-radius:5px;
+           background:var(--accent); color:#fff; font-size:14px; cursor:pointer;
+           font-family:inherit; letter-spacing:1px; }
+  button:hover { opacity:.88; }
+  button.ghost { background:#fff; color:var(--accent); border:1px solid var(--accent); }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { border:1px solid var(--line); padding:6px 8px; text-align:left; }
+  th { background:#f0e9dd; }
+  .tag { display:inline-block; padding:1px 8px; border-radius:10px; font-size:12px; }
+  .tag.add { background:#e3f2e8; color:var(--green); }
+  .tag.del { background:#fbe5e2; color:var(--red); }
+  .muted { color:var(--sub); font-size:12px; }
+  .msg { margin-top:10px; padding:10px; border-radius:5px; font-size:13px;
+         white-space:pre-wrap; display:none; }
+  .msg.ok { display:block; background:#e9f5ee; border:1px solid #b7dcc4; }
+  .msg.err { display:block; background:#fdecea; border:1px solid #f0b8b1; }
+  pre { background:#2b2620; color:#f0e9dd; padding:12px; border-radius:6px;
+        font-size:12px; overflow:auto; max-height:360px; }
+  .vol { border:1px dashed var(--line); border-radius:6px; padding:10px; margin-bottom:10px; }
+  .vol h3 { margin:0 0 6px; font-size:14px; }
+  .chars { font-size:15px; letter-spacing:3px; line-height:1.8; }
+  a { color:var(--accent); }
+  .right { text-align:right; }
+  @media (max-width: 900px) { main { grid-template-columns:1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>古籍制版 · 字模工位管理</h1>
+  <p>分册用字表 × 优先字库清单 · 每字取第一个收录它的字库 · 交印逐单出增减单 · 原单可重取</p>
+</header>
+<main>
+  <div>
+    <div class="card">
+      <h2>① 字库清单（按优先顺序）</h2>
+      <p class="muted">CSV 列：字库,版次,字模号,字。全量替换当前生效清单。
+        <a href="/samples/libraries.csv" target="_blank">下载样例</a></p>
+      <input type="file" id="libFile" accept=".csv,text/csv">
+      <button onclick="uploadLib()">上传字库清单</button>
+      <div id="libMsg" class="msg"></div>
+    </div>
+
+    <div class="card">
+      <h2>② 分册用字表</h2>
+      <p class="muted">CSV 列：字（可多行）。全量替换该册用字。
+        <a href="/samples/volume_a.csv" target="_blank">样例册甲</a> ·
+        <a href="/samples/volume_b.csv" target="_blank">样例册乙</a></p>
+      <label>册名</label>
+      <input type="text" id="volName" placeholder="例如：册甲">
+      <label>用字表 CSV</label>
+      <input type="file" id="volFile" accept=".csv,text/csv">
+      <button onclick="uploadVol()">上传用字表</button>
+      <div id="volMsg" class="msg"></div>
+    </div>
+
+    <div class="card">
+      <h2>③ 交印出单</h2>
+      <label>册名</label>
+      <input type="text" id="submitName" placeholder="例如：册甲">
+      <label>幂等键（可选；同一键重复确认复用原单）</label>
+      <input type="text" id="idemKey" placeholder="留空则按 册+用字+原清单 自动判重">
+      <button onclick="submitVol()">交印并生成增减单</button>
+      <div id="submitMsg" class="msg"></div>
+    </div>
+
+    <div class="card">
+      <h2>④ 按单号重取原单</h2>
+      <label>单号</label>
+      <input type="text" id="orderNo" placeholder="例如：MO20261120-000001">
+      <button class="ghost" onclick="fetchOrder()">查看 JSON</button>
+      <button class="ghost" onclick="downloadOrder()">下载 CSV</button>
+      <div id="orderMsg" class="msg"></div>
+    </div>
+
+    <div class="card">
+      <h2>演示辅助</h2>
+      <button class="ghost" onclick="resetAll()">清空全部数据</button>
+      <button class="ghost" onclick="loadState()">刷新右侧状态</button>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h2>当前工位状态</h2>
+      <div id="stateBox"><p class="muted">点击“刷新右侧状态”加载。</p></div>
+    </div>
+    <div class="card">
+      <h2>交印单（按生效次序）</h2>
+      <div id="ordersBox"><p class="muted">暂无。</p></div>
+    </div>
+    <div class="card">
+      <h2>最近一单 JSON 原文</h2>
+      <pre id="rawBox">（交印或重取后显示）</pre>
+    </div>
+  </div>
+</main>
+
+<script>
+function show(id, text, ok) {
+  const el = document.getElementById(id);
+  el.textContent = text;
+  el.className = "msg " + (ok ? "ok" : "err");
+}
+async function post(url, formData, headers) {
+  const resp = await fetch(url, { method:"POST", body: formData, headers: headers || {} });
+  const data = await resp.json();
+  if (!resp.ok) throw new Error(data.error || ("HTTP " + resp.status));
+  return data;
+}
+async function uploadLib() {
+  const f = document.getElementById("libFile").files[0];
+  if (!f) return show("libMsg", "请先选择 CSV 文件", false);
+  const fd = new FormData(); fd.append("file", f);
+  try {
+    const d = await post("/api/libraries", fd);
+    show("libMsg", `已替换字库清单：${d.library_count} 个字库、${d.glyph_count} 个字模`, true);
+    loadState();
+  } catch (e) { show("libMsg", e.message, false); }
+}
+async function uploadVol() {
+  const name = document.getElementById("volName").value.trim();
+  const f = document.getElementById("volFile").files[0];
+  if (!name || !f) return show("volMsg", "请填写册名并选择 CSV 文件", false);
+  const fd = new FormData(); fd.append("file", f);
+  try {
+    const d = await post(`/api/volumes/${encodeURIComponent(name)}/chars`, fd);
+    show("volMsg", `册「${d.volume}」用字表已更新，共 ${d.char_count} 个字`, true);
+    loadState();
+  } catch (e) { show("volMsg", e.message, false); }
+}
+async function submitVol() {
+  const name = document.getElementById("submitName").value.trim();
+  if (!name) return show("submitMsg", "请填写册名", false);
+  const key = document.getElementById("idemKey").value.trim();
+  const headers = {};
+  if (key) headers["Idempotency-Key"] = key;
+  try {
+    const d = await post(`/api/volumes/${encodeURIComponent(name)}/submit`,
+                         new FormData(), headers);
+    const head = (d.reused ? "♻ 复用原单 " : "✦ 新生效单 ") + d.order_no +
+                 `（册「${d.volume}」）\n`;
+    const lines = [head,
+      `增 ${d.added.length} 个：` + d.added.map(x =>
+        `${x.glyph_char}[${x.library_name}/${x.edition}/${x.matrix_no}]`).join("、"),
+      `减 ${d.removed.length} 个：` + d.removed.map(x =>
+        `${x.glyph_char}[${x.library_name}/${x.edition}/${x.matrix_no}]`).join("、"),
+      `共需字模：${d.pool_before.length} → ${d.pool_after.length}`];
+    show("submitMsg", lines.join("\n"), true);
+    document.getElementById("rawBox").textContent = JSON.stringify(d, null, 2);
+    loadState(); loadOrders();
+  } catch (e) { show("submitMsg", e.message, false); }
+}
+async function fetchOrder() {
+  const no = document.getElementById("orderNo").value.trim();
+  if (!no) return show("orderMsg", "请填写单号", false);
+  try {
+    const resp = await fetch(`/api/orders/${encodeURIComponent(no)}`);
+    const d = await resp.json();
+    if (!resp.ok) throw new Error(d.error);
+    show("orderMsg", `已重取单号 ${d.order_no}，内容与原单一致`, true);
+    document.getElementById("rawBox").textContent = JSON.stringify(d, null, 2);
+  } catch (e) { show("orderMsg", e.message, false); }
+}
+function downloadOrder() {
+  const no = document.getElementById("orderNo").value.trim();
+  if (!no) return show("orderMsg", "请填写单号", false);
+  window.open(`/api/orders/${encodeURIComponent(no)}/download`, "_blank");
+}
+async function resetAll() {
+  await fetch("/api/reset", { method:"POST" });
+  loadState(); loadOrders();
+}
+function ident(x) { return `${x.glyph_char}（${x.library_name}/${x.edition}/${x.matrix_no}）`; }
+async function loadState() {
+  const d = await (await fetch("/api/state")).json();
+  const box = document.getElementById("stateBox");
+  let html = `<p class="muted">当前生效字库：${d.libraries.map(l =>
+      `${l.name}·${l.edition}(优先级${l.priority})`).join(" → ") || "（未上传）"}</p>`;
+  for (const v of d.volumes) {
+    html += `<div class="vol"><h3>册「${v.volume}」</h3>
+      <div class="chars">用字：${v.chars.join("")}</div>
+      <div class="muted">已交印字模 ${v.active_matrices.length} 个：${
+        v.active_matrices.map(ident).join("；") || "（尚未交印）"}</div></div>`;
+  }
+  html += `<p><b>各册共需字模并集（${d.shared_pool.length} 个）：</b><br>` +
+    d.shared_pool.map(ident).join("；") + "</p>";
+  box.innerHTML = html || "<p class='muted'>暂无数据。</p>";
+}
+async function loadOrders() {
+  const d = await (await fetch("/api/orders")).json();
+  const box = document.getElementById("ordersBox");
+  if (!d.length) { box.innerHTML = "<p class='muted'>暂无。</p>"; return; }
+  let html = "<table><tr><th>生效序</th><th>单号</th><th>册</th><th>增</th><th>减</th><th>操作</th></tr>";
+  for (const o of d) {
+    html += `<tr><td>${o.seq}</td><td>${o.order_no}</td><td>${o.volume}</td>
+      <td><span class="tag add">+${o.added_count}</span></td>
+      <td><span class="tag del">-${o.removed_count}</span></td>
+      <td><a href="/api/orders/${o.order_no}/download">CSV</a> ·
+      <a href="javascript:void(0)" onclick="document.getElementById('orderNo').value='${o.order_no}';fetchOrder()">JSON</a></td></tr>`;
+  }
+  box.innerHTML = html + "</table>";
+}
+loadState(); loadOrders();
+</script>
+</body>
+</html>
